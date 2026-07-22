@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Koch Pentagram Chains – Rainbow + PNG Export</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    cursor: grab;
+    background: #000;
+  }
+
+  canvas:active { cursor: grabbing; }
+
+  #panel {
+    position: fixed;
+    top: 14px;
+    left: 14px;
+    width: 355px;
+    padding: 14px;
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(12,12,14,0.92);
+    box-shadow: 0 12px 30px rgba(0,0,0,0.45);
+    color: #eee;
+    backdrop-filter: blur(8px);
+    user-select: none;
+    z-index: 10;
+  }
+
+  #panel.hidden { display: none; }
+
+  h1 {
+    margin: 0 0 6px;
+    font-size: 18px;
+  }
+
+  .subtitle {
+    margin: 0 0 12px;
+    color: #aaa;
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .control { margin: 11px 0; }
+
+  .value-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 5px;
+    font-size: 13px;
+  }
+
+  input[type="range"] { width: 100%; }
+
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0;
+    font-size: 13px;
+  }
+
+  .buttons {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+
+  button {
+    flex: 1;
+    min-width: 90px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: #17171b;
+    color: #eee;
+    cursor: pointer;
+  }
+
+  button:hover { background: #222228; }
+
+  #status {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255,255,255,0.10);
+    color: #a5a5a5;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .help {
+    margin-top: 9px;
+    color: #7f7f7f;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<div id="panel">
+  <h1>Koch Pentagram Chains</h1>
+  <div class="subtitle">
+    Black-and-white by default, with an optional radial rainbow mode.
+    You can also export the current view as a PNG.
+  </div>
+
+  <div class="control">
+    <div class="value-row">
+      <span>Chain iterations per side</span>
+      <span id="chainValue">4</span>
+    </div>
+    <input id="chainIterations" type="range" min="0" max="10" step="1" value="4" />
+  </div>
+
+  <div class="control">
+    <div class="value-row">
+      <span>Koch iterations</span>
+      <span id="kochValue">2</span>
+    </div>
+    <input id="kochIterations" type="range" min="0" max="8" step="1" value="2" />
+  </div>
+
+  <div class="control">
+    <div class="value-row">
+      <span>Line width</span>
+      <span id="lineWidthValue">1.2</span>
+    </div>
+    <input id="lineWidth" type="range" min="0.2" max="4" step="0.1" value="1.2" />
+  </div>
+
+  <label class="check">
+    <input id="rainbowMode" type="checkbox" />
+    Radial rainbow color
+  </label>
+
+  <label class="check">
+    <input id="showAnchors" type="checkbox" />
+    Show exact meeting points
+  </label>
+
+  <div class="buttons">
+    <button id="fit">Fit view</button>
+    <button id="savePng">Save PNG</button>
+    <button id="hide">Hide panel</button>
+  </div>
+
+  <div id="status"></div>
+
+  <div class="help">
+    Wheel: zoom to cursor · Drag: pan<br>
+    H: hide/show panel · F: fit view · P: save PNG
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const PHI_10 = 1.6180339887;
+  const SCALE = 0.6180339887;                 // φ^-1, fixed to 10 decimal places
+  const INNER_RATIO = 1 / (PHI_10 * PHI_10); // φ^-2
+  const KOCH_SEGMENT_RATIO = INNER_RATIO;
+  const KOCH_TURN = 72 * Math.PI / 180;
+
+  const MIN_SCREEN_SEGMENT = 0.7;
+  const MAX_DRAWN_SEGMENTS = 1000000;
+
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+
+  const panel = document.getElementById("panel");
+  const chainIterationsInput = document.getElementById("chainIterations");
+  const kochIterationsInput = document.getElementById("kochIterations");
+  const lineWidthInput = document.getElementById("lineWidth");
+  const rainbowModeInput = document.getElementById("rainbowMode");
+  const showAnchorsInput = document.getElementById("showAnchors");
+
+  const chainValue = document.getElementById("chainValue");
+  const kochValue = document.getElementById("kochValue");
+  const lineWidthValue = document.getElementById("lineWidthValue");
+  const status = document.getElementById("status");
+
+  let cssWidth = 0;
+  let cssHeight = 0;
+  let dragging = false;
+  let prevX = 0;
+  let prevY = 0;
+  let frameRequested = false;
+
+  const view = {
+    baseScale: 1,
+    zoom: 1,
+    panX: 0,
+    panY: 0
+  };
+
+  const drawStats = {
+    drawnSegments: 0,
+    skippedBranches: 0,
+    simplifiedBranches: 0,
+    budgetReached: false
+  };
+
+  function requestDraw() {
+    if (frameRequested) return;
+    frameRequested = true;
+
+    requestAnimationFrame(() => {
+      frameRequested = false;
+      draw();
+    });
+  }
+
+  function starPoints(star) {
+    const points = [];
+
+    for (let i = 0; i < 10; i++) {
+      const radius = (i % 2 === 0) ? star.r : star.r * INNER_RATIO;
+      const angle = star.tipAngle - i * Math.PI / 5;
+
+      points.push({
+        x: star.cx + Math.cos(angle) * radius,
+        y: star.cy + Math.sin(angle) * radius
+      });
+    }
+
+    return points;
+  }
+
+  function placeTipAt(anchor, radius, tipAngle, level, arm) {
+    const ux = Math.cos(tipAngle);
+    const uy = Math.sin(tipAngle);
+
+    const star = {
+      cx: anchor.x - ux * radius,
+      cy: anchor.y - uy * radius,
+      r: radius,
+      tipAngle,
+      level,
+      arm
+    };
+
+    const tip = starPoints(star)[0];
+    star.cx += anchor.x - tip.x;
+    star.cy += anchor.y - tip.y;
+
+    return star;
+  }
+
+  function buildGeometry(chainIterations) {
+    const stars = [];
+    const anchors = [];
+    let maxError = 0;
+
+    const root = {
+      cx: 0,
+      cy: 0,
+      r: 1,
+      tipAngle: Math.PI / 2,
+      level: 0,
+      arm: -1
+    };
+
+    stars.push(root);
+
+    if (chainIterations === 0) {
+      return { stars, anchors, maxError };
+    }
+
+    const rootPoints = starPoints(root);
+    const notchIndices = [1, 3, 5, 7, 9];
+
+    for (let arm = 0; arm < 5; arm++) {
+      const anchor = rootPoints[notchIndices[arm]];
+      const tipAngle = Math.atan2(
+        root.cy - anchor.y,
+        root.cx - anchor.x
+      );
+
+      let current = placeTipAt(anchor, root.r * SCALE, tipAngle, 1, arm);
+
+      stars.push(current);
+      anchors.push({ ...anchor, arm, level: 1 });
+
+      let tip = starPoints(current)[0];
+      maxError = Math.max(maxError, Math.hypot(tip.x - anchor.x, tip.y - anchor.y));
+
+      for (let level = 2; level <= chainIterations; level++) {
+        const currentPoints = starPoints(current);
+        const nextAnchor = currentPoints[5];
+
+        const next = placeTipAt(nextAnchor, current.r * SCALE, current.tipAngle, level, arm);
+
+        stars.push(next);
+        anchors.push({ ...nextAnchor, arm, level });
+
+        tip = starPoints(next)[0];
+        maxError = Math.max(maxError, Math.hypot(tip.x - nextAnchor.x, tip.y - nextAnchor.y));
+
+        current = next;
+      }
+    }
+
+    return { stars, anchors, maxError };
+  }
+
+  function worldToScreen(x, y) {
+    const scale = view.baseScale * view.zoom;
+
+    return {
+      x: cssWidth * 0.5 + view.panX + x * scale,
+      y: cssHeight * 0.5 + view.panY - y * scale
+    };
+  }
+
+  function segmentVisible(ax, ay, bx, by, screenLength) {
+    const a = worldToScreen(ax, ay);
+    const b = worldToScreen(bx, by);
+    const padding = screenLength * 0.75 + 3;
+
+    const minX = Math.min(a.x, b.x) - padding;
+    const maxX = Math.max(a.x, b.x) + padding;
+    const minY = Math.min(a.y, b.y) - padding;
+    const maxY = Math.max(a.y, b.y) + padding;
+
+    return !(
+      maxX < 0 ||
+      minX > cssWidth ||
+      maxY < 0 ||
+      minY > cssHeight
+    );
+  }
+
+  function colorForSegment(ax, ay, bx, by) {
+    if (!rainbowModeInput.checked) return "#ffffff";
+
+    const mx = (ax + bx) * 0.5;
+    const my = (ay + by) * 0.5;
+    let angle = Math.atan2(my, mx);
+    if (angle < 0) angle += Math.PI * 2;
+
+    const hue = angle * 180 / Math.PI;
+    return `hsl(${hue.toFixed(2)} 100% 50%)`;
+  }
+
+  function strokeLeaf(ax, ay, bx, by) {
+    if (drawStats.drawnSegments >= MAX_DRAWN_SEGMENTS) {
+      drawStats.budgetReached = true;
+      return;
+    }
+
+    const a = worldToScreen(ax, ay);
+    const b = worldToScreen(bx, by);
+
+    ctx.strokeStyle = colorForSegment(ax, ay, bx, by);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+
+    drawStats.drawnSegments++;
+  }
+
+  function strokeKochSegment(ax, ay, bx, by, depth) {
+    if (drawStats.budgetReached) return;
+
+    const dx = bx - ax;
+    const dy = by - ay;
+    const worldLength = Math.hypot(dx, dy);
+    const screenLength = worldLength * view.baseScale * view.zoom;
+
+    if (!segmentVisible(ax, ay, bx, by, screenLength)) {
+      drawStats.skippedBranches++;
+      return;
+    }
+
+    if (depth === 0 || screenLength <= MIN_SCREEN_SEGMENT) {
+      if (depth > 0) drawStats.simplifiedBranches++;
+      strokeLeaf(ax, ay, bx, by);
+      return;
+    }
+
+    const vx = dx * KOCH_SEGMENT_RATIO;
+    const vy = dy * KOCH_SEGMENT_RATIO;
+
+    const c = Math.cos(KOCH_TURN);
+    const s = Math.sin(KOCH_TURN);
+
+    const plusX = vx * c - vy * s;
+    const plusY = vx * s + vy * c;
+
+    const minusX = vx * c + vy * s;
+    const minusY = -vx * s + vy * c;
+
+    const p1x = ax + vx;
+    const p1y = ay + vy;
+
+    const p2x = p1x + plusX;
+    const p2y = p1y + plusY;
+
+    const p3x = p2x + minusX;
+    const p3y = p2y + minusY;
+
+    strokeKochSegment(ax,  ay,  p1x, p1y, depth - 1);
+    strokeKochSegment(p1x, p1y, p2x, p2y, depth - 1);
+    strokeKochSegment(p2x, p2y, p3x, p3y, depth - 1);
+    strokeKochSegment(p3x, p3y, bx,  by,  depth - 1);
+  }
+
+  function strokeStar(star, kochIterations) {
+    const points = starPoints(star);
+
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i];
+      const b = points[(i + 1) % points.length];
+      strokeKochSegment(a.x, a.y, b.x, b.y, kochIterations);
+      if (drawStats.budgetReached) return;
+    }
+  }
+
+  function drawAnchor(anchor) {
+    const p = worldToScreen(anchor.x, anchor.y);
+    ctx.fillStyle = rainbowModeInput.checked ? colorForSegment(anchor.x, anchor.y, anchor.x + 0.0001, anchor.y) : "#ffffff";
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function computeBounds(stars) {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    for (const star of stars) {
+      for (const p of starPoints(star)) {
+        minX = Math.min(minX, p.x);
+        minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x);
+        maxY = Math.max(maxY, p.y);
+      }
+    }
+
+    return { minX, minY, maxX, maxY };
+  }
+
+  function fitView() {
+    const chainIterations = Number(chainIterationsInput.value);
+    const geometry = buildGeometry(chainIterations);
+    const bounds = computeBounds(geometry.stars);
+
+    const width = Math.max(0.001, bounds.maxX - bounds.minX);
+    const height = Math.max(0.001, bounds.maxY - bounds.minY);
+
+    view.baseScale = 0.84 * Math.min(
+      cssWidth / width,
+      cssHeight / height
+    );
+
+    view.zoom = 1;
+    view.panX = -((bounds.minX + bounds.maxX) * 0.5) * view.baseScale;
+    view.panY =  ((bounds.minY + bounds.maxY) * 0.5) * view.baseScale;
+
+    requestDraw();
+  }
+
+  function draw() {
+    const chainIterations = Number(chainIterationsInput.value);
+    const kochIterations = Number(kochIterationsInput.value);
+    const { stars, anchors, maxError } = buildGeometry(chainIterations);
+
+    chainValue.textContent = chainIterations;
+    kochValue.textContent = kochIterations;
+    lineWidthValue.textContent = Number(lineWidthInput.value).toFixed(1);
+
+    drawStats.drawnSegments = 0;
+    drawStats.skippedBranches = 0;
+    drawStats.simplifiedBranches = 0;
+    drawStats.budgetReached = false;
+
+    ctx.save();
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+    ctx.lineWidth = Number(lineWidthInput.value);
+    ctx.lineCap = "butt";
+    ctx.lineJoin = "miter";
+    ctx.miterLimit = 20;
+
+    for (const star of stars) {
+      strokeStar(star, kochIterations);
+      if (drawStats.budgetReached) break;
+    }
+
+    if (showAnchorsInput.checked) {
+      for (const anchor of anchors) drawAnchor(anchor);
+    }
+
+    ctx.restore();
+
+    const totalPentagrams = 1 + 5 * chainIterations;
+    const exactSegmentsPerStar = 10 * Math.pow(4, kochIterations);
+
+    status.innerHTML =
+      `φ = ${PHI_10.toFixed(10)}<br>` +
+      `Scale per child = φ⁻¹ = ${SCALE.toFixed(10)}<br>` +
+      `Total pentagrams: ${totalPentagrams.toLocaleString()}<br>` +
+      `Koch exact segments per pentagram: ${exactSegmentsPerStar.toLocaleString()}<br>` +
+      `Actually drawn segments: ${drawStats.drawnSegments.toLocaleString()}<br>` +
+      `Color mode: ${rainbowModeInput.checked ? "radial rainbow" : "white" }<br>` +
+      `Maximum tip-to-notch coordinate error: ${maxError.toExponential(3)}` +
+      (drawStats.simplifiedBranches > 0 ? `<br>Subpixel Koch branches simplified: ${drawStats.simplifiedBranches.toLocaleString()}` : "") +
+      (drawStats.skippedBranches > 0 ? `<br>Off-screen branches skipped: ${drawStats.skippedBranches.toLocaleString()}` : "") +
+      (drawStats.budgetReached ? `<br><strong>Render budget reached — zoom in for more detail.</strong>` : "");
+  }
+
+  function savePng() {
+    requestAnimationFrame(() => {
+      const chainIterations = chainIterationsInput.value;
+      const kochIterations = kochIterationsInput.value;
+      const mode = rainbowModeInput.checked ? "rainbow" : "bw";
+      const filename = `koch_pentagram_chains_chain${chainIterations}_koch${kochIterations}_${mode}.png`;
+
+      canvas.toBlob(blob => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }, "image/png");
+    });
+  }
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+
+    cssWidth = window.innerWidth;
+    cssHeight = window.innerHeight;
+
+    canvas.width = Math.round(cssWidth * dpr);
+    canvas.height = Math.round(cssHeight * dpr);
+    canvas.style.width = cssWidth + "px";
+    canvas.style.height = cssHeight + "px";
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    fitView();
+  }
+
+  canvas.addEventListener("pointerdown", event => {
+    dragging = true;
+    prevX = event.clientX;
+    prevY = event.clientY;
+    canvas.setPointerCapture(event.pointerId);
+  });
+
+  canvas.addEventListener("pointermove", event => {
+    if (!dragging) return;
+
+    view.panX += event.clientX - prevX;
+    view.panY += event.clientY - prevY;
+
+    prevX = event.clientX;
+    prevY = event.clientY;
+
+    requestDraw();
+  });
+
+  canvas.addEventListener("pointerup", event => {
+    dragging = false;
+    canvas.releasePointerCapture(event.pointerId);
+  });
+
+  canvas.addEventListener("pointercancel", () => {
+    dragging = false;
+  });
+
+  canvas.addEventListener("wheel", event => {
+    event.preventDefault();
+
+    const oldZoom = view.zoom;
+    const factor = Math.exp(-event.deltaY * 0.0012);
+    const newZoom = Math.max(0.05, Math.min(300, oldZoom * factor));
+
+    const centerX = cssWidth * 0.5;
+    const centerY = cssHeight * 0.5;
+
+    const relativeX = event.clientX - centerX - view.panX;
+    const relativeY = event.clientY - centerY - view.panY;
+    const ratio = newZoom / oldZoom;
+
+    view.panX -= relativeX * (ratio - 1);
+    view.panY -= relativeY * (ratio - 1);
+    view.zoom = newZoom;
+
+    requestDraw();
+  }, { passive: false });
+
+  chainIterationsInput.addEventListener("input", fitView);
+  kochIterationsInput.addEventListener("input", requestDraw);
+  lineWidthInput.addEventListener("input", requestDraw);
+  rainbowModeInput.addEventListener("change", requestDraw);
+  showAnchorsInput.addEventListener("change", requestDraw);
+
+  document.getElementById("fit").addEventListener("click", fitView);
+  document.getElementById("savePng").addEventListener("click", savePng);
+  document.getElementById("hide").addEventListener("click", () => {
+    panel.classList.add("hidden");
+  });
+
+  window.addEventListener("keydown", event => {
+    const key = event.key.toLowerCase();
+    if (key === "h") panel.classList.toggle("hidden");
+    if (key === "f") fitView();
+    if (key === "p") savePng();
+  });
+
+  window.addEventListener("resize", resize);
+
+  resize();
+})();
+</script>
+</body>
+</html>
